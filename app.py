@@ -1,495 +1,394 @@
 
 import io
-import json
+import re
 import streamlit as st
 import fitz
 from docx import Document
 
-from clause_analyzer import analyze_policy
-
-
-# -------------------- PAGE SETTINGS --------------------
+# ==================================================
+# CLAUSEWISE AI - PUBLIC RULE-BASED NLP VERSION
+# No Ollama, API key or local AI required
+# ==================================================
 
 st.set_page_config(
-    page_title="ClauseWise AI",
+    page_title="ClauseWise | Legal Document Analyzer",
     page_icon="⚖️",
-    layout="wide",
+    layout="wide"
 )
 
-
-# -------------------- DESIGN --------------------
+# ---------------- DESIGN ----------------
 
 st.markdown("""
 <style>
-.stApp {
-    background: #f5f7fb;
-}
-.block-container {
-    max-width: 1200px;
-    padding-top: 2rem;
-}
+.stApp {background:#f5f7fb;}
+.block-container {max-width:1150px;padding-top:2rem;}
 .hero {
-    background: linear-gradient(120deg, #101d3a, #234c80);
-    color: white;
-    padding: 30px;
-    border-radius: 18px;
-    margin-bottom: 24px;
+ background:linear-gradient(120deg,#132744,#254a91,#4268e9);
+ padding:32px;border-radius:20px;color:white;margin-bottom:25px;
 }
-.hero h1 {
-    color: white;
-    font-size: 38px;
+.hero h1 {color:white;font-size:36px;}
+.hero p {color:#e5edff;font-size:16px;}
+.card {
+ background:white;padding:20px;border-radius:14px;
+ border:1px solid #e5eaf2;margin:12px 0;
 }
-.hero p {
-    color: #e1e9f7;
-    font-size: 17px;
-}
-div[data-testid="stMetric"] {
-    background: white;
-    padding: 16px;
-    border-radius: 12px;
-    border: 1px solid #e5eaf2;
-}
+.small {color:#66758b;font-size:13px;}
 </style>
 """, unsafe_allow_html=True)
 
+# ---------------- TEXT EXTRACTION ----------------
 
-# -------------------- SESSION STATE --------------------
+def extract_text(file):
+    data = file.getvalue()
+    name = file.name.lower()
 
-if "policy_text" not in st.session_state:
-    st.session_state.policy_text = ""
+    if name.endswith(".pdf"):
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            return "\n".join(page.get_text() for page in pdf)
 
-if "analysis_results" not in st.session_state:
-    st.session_state.analysis_results = []
+    if name.endswith(".docx"):
+        doc = Document(io.BytesIO(data))
+        parts = [p.text for p in doc.paragraphs]
+        for table in doc.tables:
+            for row in table.rows:
+                parts.append(" | ".join(c.text for c in row.cells))
+        return "\n".join(parts)
 
-if "loaded_filename" not in st.session_state:
-    st.session_state.loaded_filename = None
+    if name.endswith(".txt"):
+        return data.decode("utf-8", errors="replace")
 
+    return ""
 
-# -------------------- SIDEBAR --------------------
+# ---------------- CLAUSE CLASSIFICATION ----------------
 
-st.sidebar.title("⚖️ ClauseWise AI")
-st.sidebar.caption("Understand every clause before you agree.")
-st.sidebar.divider()
+CATEGORIES = {
+    "Payment": ["payment", "pay", "fee", "invoice", "salary",
+                "amount", "charges", "interest"],
+    "Termination": ["terminate", "termination", "cancel",
+                    "cancellation", "end this agreement"],
+    "Confidentiality": ["confidential", "disclose", "secret",
+                        "non-disclosure", "proprietary"],
+    "Liability": ["liability", "liable", "damages",
+                  "indemnify", "indemnification"],
+    "Privacy": ["personal data", "privacy", "data collection",
+                "process personal", "information"],
+    "Renewal": ["renew", "renewal", "automatically extend",
+                "auto-renew"],
+    "Restrictions": ["prohibited", "shall not", "must not",
+                     "restricted", "forbidden"],
+    "Dispute Resolution": ["arbitration", "dispute",
+                           "jurisdiction", "court"],
+    "Obligations": ["shall", "must", "agrees to", "is required to"],
+}
 
-st.sidebar.subheader("Features")
-st.sidebar.write("📄 PDF, DOCX and TXT upload")
-st.sidebar.write("🔍 NLP-based clause classification")
-st.sidebar.write("🧠 Plain-English rule-based explanations")
-st.sidebar.write("🧩 Structured meaning representation")
-st.sidebar.write("⏰ Condition and deadline extraction")
-st.sidebar.write("🚩 Risk-pattern screening")
-st.sidebar.write("📥 Downloadable analysis report")
+RISK_PATTERNS = {
+    "High attention": [
+        "unlimited liability",
+        "without notice",
+        "sole discretion",
+        "waive all claims",
+        "irrevocably",
+        "without any refund",
+        "perpetual",
+        "indemnify against all claims",
+    ],
+    "Medium attention": [
+        "penalty",
+        "automatic renewal",
+        "non-refundable",
+        "at any time",
+        "additional charges",
+        "may modify",
+        "without prior consent",
+    ],
+}
 
-st.sidebar.info(
-    "Works directly online. No Ollama installation or API key required."
-)
+def classify_clause(text):
+    lower = text.lower()
 
-st.sidebar.warning(
-    "This application provides preliminary text analysis, "
-    "not legal advice."
-)
+    scores = {
+        category: sum(1 for word in words if word in lower)
+        for category, words in CATEGORIES.items()
+    }
 
+    best = max(scores, key=scores.get)
+    if scores[best] == 0:
+        best = "General Provision"
 
-# -------------------- HEADER --------------------
+    return best
+
+def identify_risk(text):
+    lower = text.lower()
+
+    for level in ["High attention", "Medium attention"]:
+        matches = [
+            phrase for phrase in RISK_PATTERNS[level]
+            if phrase in lower
+        ]
+        if matches:
+            return level, matches
+
+    return "No configured risk pattern detected", []
+
+def explain_clause(text, category):
+    lower = text.lower()
+
+    if category == "Payment":
+        return ("This clause concerns money, fees or payment obligations. "
+                "Check the amount, due date, additional charges and refund terms.")
+
+    if category == "Termination":
+        return ("This clause concerns ending the agreement. "
+                "Check who can terminate it, the notice period and any consequences.")
+
+    if category == "Confidentiality":
+        return ("This clause concerns protecting confidential information. "
+                "Check what information is protected, permitted disclosures and how long the duty lasts.")
+
+    if category == "Liability":
+        return ("This clause concerns responsibility for losses or damages. "
+                "Check the extent of responsibility, exclusions and any financial limits.")
+
+    if category == "Privacy":
+        return ("This clause concerns personal information or data handling. "
+                "Check what data is collected, why it is used and who can access it.")
+
+    if category == "Renewal":
+        return ("This clause concerns extending the agreement. "
+                "Check whether renewal happens automatically and how to prevent it.")
+
+    if category == "Restrictions":
+        return ("This clause places limits on permitted actions. "
+                "Identify exactly what is restricted and whether exceptions are provided.")
+
+    if category == "Dispute Resolution":
+        return ("This clause explains how disagreements may be resolved. "
+                "Check the specified process, location and applicable rules.")
+
+    if "shall" in lower or "must" in lower:
+        return ("This clause appears to create a duty or requirement. "
+                "Identify who must act, what they must do and any stated deadline.")
+
+    return ("This clause contains a general agreement provision. "
+            "Review the exact wording to identify its effect, conditions and exceptions.")
+
+def split_clauses(text):
+    chunks = re.split(r'\n\s*(?=(?:\d+(?:\.\d+)*[.)]?\s+|[A-Z][.)]\s+))', text)
+    clauses = []
+
+    for chunk in chunks:
+        chunk = re.sub(r'\s+', ' ', chunk).strip()
+        if len(chunk) >= 25:
+            clauses.append(chunk)
+
+    if not clauses:
+        clauses = [
+            part.strip()
+            for part in re.split(r'(?<=[.;])\s+', text)
+            if len(part.strip()) >= 25
+        ]
+
+    return clauses[:60]
+
+def analyze(text):
+    results = []
+
+    for index, clause in enumerate(split_clauses(text), 1):
+        category = classify_clause(clause)
+        risk, reasons = identify_risk(clause)
+
+        results.append({
+            "number": index,
+            "text": clause,
+            "category": category,
+            "meaning": explain_clause(clause, category),
+            "risk": risk,
+            "reasons": reasons,
+        })
+
+    return results
+
+# ---------------- HEADER ----------------
 
 st.markdown("""
 <div class="hero">
-    <h1>ClauseWise AI ⚖️</h1>
-    <p>Understand every clause before you agree.</p>
-    <p>
-        An NLP-based policy analyzer that extracts clauses,
-        identifies common patterns, explains detected meanings
-        and highlights conditions and potential risk signals.
-    </p>
+ <h1>⚖️ ClauseWise</h1>
+ <p>Understand the words. Notice the risks.</p>
+ <p>Explore agreement clauses, identify obligations and examine
+ potential risk patterns in plain English.</p>
 </div>
 """, unsafe_allow_html=True)
 
+with st.sidebar:
+    st.title("⚖️ ClauseWise")
+    st.caption("Legal Document Awareness")
+    st.divider()
+    st.write("📄 Document upload")
+    st.write("🔍 Clause classification")
+    st.write("📖 Plain-English explanations")
+    st.write("🚩 Risk-pattern detection")
+    st.write("📥 Downloadable report")
+    st.divider()
+    st.info("This public version uses rule-based NLP. No local AI or API key is required.")
 
-# -------------------- DOCUMENT UPLOAD --------------------
+# ---------------- INPUT ----------------
 
-st.subheader("📄 Analyze a Policy or Agreement")
+st.header("1. Upload your agreement")
 
-uploaded_file = st.file_uploader(
-    "Upload a policy document",
-    type=["pdf", "docx", "txt"],
+uploaded = st.file_uploader(
+    "Choose a document",
+    type=["pdf", "docx", "txt"]
 )
 
-if uploaded_file is not None:
+pasted = st.text_area(
+    "Or paste agreement text",
+    height=180,
+    placeholder="Paste your agreement or legal clause here..."
+)
+
+text = ""
+
+if uploaded:
     try:
-        if st.session_state.loaded_filename != uploaded_file.name:
+        text = extract_text(uploaded)
+        if not text.strip():
+            st.warning("No selectable text found. Scanned PDFs require OCR.")
+    except Exception as e:
+        st.error(f"Document reading error: {e}")
 
-            file_bytes = uploaded_file.getvalue()
-            filename = uploaded_file.name.lower()
+elif pasted.strip():
+    text = pasted.strip()
 
-            if filename.endswith(".pdf"):
-                with fitz.open(
-                    stream=file_bytes,
-                    filetype="pdf",
-                ) as pdf:
-                    extracted_text = "\n".join(
-                        page.get_text() for page in pdf
-                    )
+# ---------------- ANALYSIS ----------------
 
-            elif filename.endswith(".docx"):
-                document = Document(io.BytesIO(file_bytes))
-                extracted_text = "\n".join(
-                    paragraph.text
-                    for paragraph in document.paragraphs
-                )
+if text.strip():
+    st.success("Document text is ready for analysis.")
 
-            else:
-                extracted_text = file_bytes.decode("utf-8-sig")
+    if st.button("🔍 Analyze Agreement", type="primary",
+                 use_container_width=True):
+        st.session_state.results = analyze(text)
+        st.session_state.source_text = text
 
-            if extracted_text.strip():
-                st.session_state.policy_text = extracted_text
-                st.session_state.analysis_results = []
-                st.session_state.loaded_filename = uploaded_file.name
-
-                st.success("Document text extracted successfully!")
-
-            else:
-                st.warning(
-                    "No selectable text was found. Scanned PDFs "
-                    "need OCR, which is not included in this version."
-                )
-
-    except Exception as error:
-        st.error(f"Could not read the file: {error}")
-
-
-# -------------------- TEXT INPUT --------------------
-
-policy_text = st.text_area(
-    "Paste or edit policy text",
-    key="policy_text",
-    height=240,
-    placeholder="Paste an agreement, terms of service or privacy policy here...",
-)
-
-
-# -------------------- ANALYSIS --------------------
-
-if st.button(
-    "🔍 Analyze Policy",
-    type="primary",
-    use_container_width=True,
-):
-
-    if not policy_text.strip():
-        st.warning("Please paste text or upload a document.")
-
-    else:
-        try:
-            with st.spinner("Analyzing clauses and identifying patterns..."):
-
-                st.session_state.analysis_results = analyze_policy(
-                    policy_text
-                )
-
-            if st.session_state.analysis_results:
-                st.success("Policy analysis completed successfully!")
-            else:
-                st.warning(
-                    "No clauses were identified. Try providing more text."
-                )
-
-        except Exception as error:
-            st.session_state.analysis_results = []
-            st.error(f"Analysis failed: {error}")
-
-
-# -------------------- RESULTS DASHBOARD --------------------
-
-results = st.session_state.analysis_results
-
-if results:
+if st.session_state.get("results"):
+    results = st.session_state.results
 
     st.divider()
-    st.header("📊 Analysis Dashboard")
+    st.header("2. Analysis Dashboard")
 
-    category_counts = {}
-    risk_counts = {}
+    high = sum(r["risk"] == "High attention" for r in results)
+    medium = sum(r["risk"] == "Medium attention" for r in results)
+    categories = len(set(r["category"] for r in results))
 
-    for result in results:
+    a, b, c, d = st.columns(4)
+    a.metric("Total Clauses", len(results))
+    b.metric("Categories", categories)
+    c.metric("High Attention", high)
+    d.metric("Medium Attention", medium)
 
-        category = result.get("category", "Unclassified")
-        risk = result.get("risk_level", "Not assessed")
-
-        category_counts[category] = (
-            category_counts.get(category, 0) + 1
-        )
-
-        risk_counts[risk] = risk_counts.get(risk, 0) + 1
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric("Total Clauses", len(results))
-
-    col2.metric(
-        "Categories Found",
-        len(category_counts)
-    )
-
-    col3.metric(
-        "High-Attention Flags",
-        risk_counts.get("High attention", 0)
-    )
-
-    col4.metric(
-        "Medium-Attention Flags",
-        risk_counts.get("Medium attention", 0)
-    )
-
-    left, right = st.columns(2)
-
-    with left:
-        st.subheader("Clause Categories")
-        st.bar_chart(category_counts)
-
-    with right:
-        st.subheader("Attention Patterns")
-        st.bar_chart(risk_counts)
-
-
-    # -------------------- CLAUSE DETAILS --------------------
+    st.subheader("Category Distribution")
+    counts = {}
+    for r in results:
+        counts[r["category"]] = counts.get(r["category"], 0) + 1
+    st.bar_chart(counts)
 
     st.divider()
-    st.subheader("🔎 Clause-by-Clause Analysis")
+    st.header("3. Clause-by-Clause Explanation")
 
-    for result in results:
-
-        confidence = max(
-            0.0,
-            min(
-                1.0,
-                float(result.get("confidence", 0.50))
-            )
-        )
-
-        risk = result.get("risk_level", "Not assessed")
-
-        meaning = result.get(
-            "meaning_representation", {}
-        )
-
-        if not isinstance(meaning, dict):
-            meaning = {}
-
-        clause_number = result.get("clause_number", "?")
-        category = result.get("category", "Unclassified")
-
-        original_text = result.get(
-            "original_text", "Original clause unavailable."
-        )
-
-        simple_explanation = result.get(
-            "simple_explanation",
-            "No common explanation pattern was identified."
-        )
-
+    for r in results:
         with st.expander(
-            f"Clause {clause_number} — {category} — {risk}",
-            expanded=False
+            f"Clause {r['number']} | {r['category']} | {r['risk']}"
         ):
+            st.markdown("**Original Agreement Clause**")
+            st.write(r["text"])
 
-            st.markdown("### 1. Original Agreement Clause")
-            st.write(original_text)
+            st.markdown("**Simple Meaning**")
+            st.info(r["meaning"])
 
-            st.markdown("### 2. Simple Meaning")
-            st.info(simple_explanation)
+            st.markdown("**Classification**")
+            st.write(r["category"])
 
-            st.caption(
-                "This explanation is generated using configured "
-                "NLP and text-pattern analysis, not generative AI."
-            )
-
-            st.markdown("### 3. Structured Meaning Representation")
-
-            meaning_col1, meaning_col2 = st.columns(2)
-
-            with meaning_col1:
-
-                st.markdown("**Actor**")
-                st.write(meaning.get("actor", "Not identified"))
-
-                st.markdown("**Action**")
-                st.write(meaning.get("action", "Not identified"))
-
-                st.markdown("**Object**")
-                st.write(meaning.get("object", "Not identified"))
-
-            with meaning_col2:
-
-                st.markdown("**Modality**")
-                st.write(meaning.get("modality", "Not identified"))
-
-                st.markdown("**Conditions**")
-
-                meaning_conditions = meaning.get(
-                    "conditions", []
-                )
-
-                if meaning_conditions:
-                    for condition in meaning_conditions:
-                        st.write(f"• {condition}")
-                else:
-                    st.write("No common condition pattern detected.")
-
-            with st.expander("View machine-readable meaning"):
-                st.json(meaning)
-
-
-            # -------------------- CLASSIFICATION --------------------
-
-            st.markdown("### 4. Clause Classification")
-
-            st.write(f"**Category:** {category}")
-
-            st.progress(confidence)
-
-            st.write(
-                f"Rule-match score: {confidence:.0%}"
-            )
-
-            st.caption(
-                "This score represents the configured rule match, "
-                "not a calibrated probability of correctness."
-            )
-
-
-            # -------------------- RISK SCREENING --------------------
-
-            st.markdown("### 5. Risk-Pattern Screening")
-
-            if risk == "High attention":
-                st.error(f"🚩 {risk}")
-
-            elif risk == "Medium attention":
-                st.warning(f"⚠️ {risk}")
-
+            st.markdown("**Risk Screening**")
+            if r["risk"] == "High attention":
+                st.error(r["risk"])
+            elif r["risk"] == "Medium attention":
+                st.warning(r["risk"])
             else:
-                st.info(f"ℹ️ {risk}")
+                st.success(r["risk"])
 
-            risk_reasons = result.get("risk_reasons", [])
+            if r["reasons"]:
+                st.write("Matched patterns:", ", ".join(r["reasons"]))
 
-            if risk_reasons:
-                for reason in risk_reasons:
-                    st.write(f"• {reason}")
-            else:
-                st.write("No configured risk patterns were identified.")
+    # ---------------- CONCLUSION ----------------
 
-            st.caption(
-                "Risk labels are preliminary screening signals, "
-                "not legal conclusions."
-            )
+    st.divider()
+    st.header("4. Overall Conclusion")
 
+    if high:
+        st.warning(
+            f"{high} clause(s) contain configured high-attention patterns. "
+            "Review their exact wording carefully before accepting the agreement."
+        )
+    elif medium:
+        st.info(
+            f"{medium} clause(s) contain configured medium-attention patterns. "
+            "Review the conditions, charges and obligations."
+        )
+    else:
+        st.success(
+            "No configured high- or medium-attention patterns were detected. "
+            "This does not guarantee that the agreement is safe or risk-free."
+        )
 
-            # -------------------- CONDITIONS --------------------
+    st.write(
+        f"The document contains {len(results)} detected clauses across "
+        f"{categories} categories. Read the original wording and verify "
+        "important obligations before signing."
+    )
 
-            st.markdown("### 6. Conditions and Deadlines")
+    # ---------------- REPORT ----------------
 
-            conditions = result.get("conditions", [])
+    st.divider()
+    st.header("5. Download Report")
 
-            if conditions:
-                for condition in conditions:
-                    st.write(f"• {condition}")
-            else:
-                st.write(
-                    "No common condition or deadline pattern detected."
-                )
-
-
-    # -------------------- DOWNLOAD REPORT --------------------
-
-    report_lines = [
-        "CLAUSEWISE — POLICY ANALYSIS REPORT",
-        "=" * 55,
-        "",
-        "Analysis type: Rule-based NLP and text-pattern analysis",
-        "Disclaimer: Preliminary automated text analysis only.",
-        "This report is not legal advice or a definitive risk assessment.",
-        "",
-        f"Total clauses analyzed: {len(results)}",
+    report = [
+        "CLAUSEWISE - POLICY ANALYSIS REPORT",
+        "=" * 45,
+        f"Total clauses: {len(results)}",
+        f"High attention: {high}",
+        f"Medium attention: {medium}",
         "",
     ]
 
-    for result in results:
-
-        meaning = result.get(
-            "meaning_representation", {}
-        )
-
-        if not isinstance(meaning, dict):
-            meaning = {}
-
-        confidence = float(
-            result.get("confidence", 0.50)
-        )
-
-        report_lines.extend([
-            f"CLAUSE {result.get('clause_number', '?')}",
-            "-" * 40,
-
-            f"Category: {result.get('category', 'Unclassified')}",
-
-            f"Rule-match score: {confidence:.0%}",
-
-            f"Attention level: {result.get('risk_level', 'Not assessed')}",
-
-            "Attention reasons: " + "; ".join(
-                map(str, result.get("risk_reasons", []))
-            ),
-
-            "",
-            "Original clause:",
-            str(result.get("original_text", "")),
-
-            "",
-            "Simple meaning:",
-            str(result.get("simple_explanation", "")),
-
-            "",
-            "Structured meaning:",
-
-            f"Actor: {meaning.get('actor', 'Not identified')}",
-
-            f"Action: {meaning.get('action', 'Not identified')}",
-
-            f"Object: {meaning.get('object', 'Not identified')}",
-
-            f"Modality: {meaning.get('modality', 'Not identified')}",
-
-            "Semantic conditions: " + "; ".join(
-                map(str, meaning.get("conditions", []))
-            ),
-
-            "Detected conditions/deadlines: " + "; ".join(
-                map(str, result.get("conditions", []))
-            ),
-
+    for r in results:
+        report.extend([
+            f"CLAUSE {r['number']}",
+            f"Category: {r['category']}",
+            f"Attention: {r['risk']}",
+            f"Original text: {r['text']}",
+            f"Simple meaning: {r['meaning']}",
+            f"Matched patterns: {', '.join(r['reasons'])}",
             "",
         ])
 
+    report.extend([
+        "CONCLUSION",
+        f"{high} high-attention and {medium} medium-attention clauses detected.",
+        "",
+        "DISCLAIMER: Preliminary rule-based text analysis only. Not legal advice.",
+    ])
+
     st.download_button(
-        "⬇️ Download Analysis Report",
-        data="\n".join(report_lines),
-        file_name="clausewise_analysis.txt",
+        "⬇️ Download ClauseWise Report",
+        "\n".join(report),
+        file_name="ClauseWise_Report.txt",
         mime="text/plain",
         use_container_width=True,
     )
 
-
-# -------------------- FOOTER --------------------
+# ---------------- FOOTER ----------------
 
 st.divider()
-
 st.caption(
-    "ClauseWise | NLP-Based Policy Analysis and Meaning Representation"
-)
-
-st.caption(
-    "This application uses configured NLP and rule-based patterns. "
-    "It may miss context, exceptions or complex legal meanings. "
-    "Review the original document and consult a qualified legal "
-    "professional before making important decisions."
+    "ClauseWise | Rule-Based NLP Legal Document Awareness "
+    "| Automated results are preliminary and are not legal advice."
 )
